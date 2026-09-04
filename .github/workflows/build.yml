@@ -154,6 +154,110 @@ jobs:
 
           flutter pub get
 
+      - name: Fix Android Gradle compatibility
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          android = Path("android")
+          wrapper = android / "gradle/wrapper/gradle-wrapper.properties"
+          props = android / "gradle.properties"
+
+          if not wrapper.exists():
+              raise SystemExit("gradle-wrapper.properties tidak ditemukan")
+
+          scan_files = [
+              android / "settings.gradle",
+              android / "settings.gradle.kts",
+              android / "build.gradle",
+              android / "build.gradle.kts",
+              android / "app/build.gradle",
+              android / "app/build.gradle.kts",
+          ]
+          text = "\n".join(
+              f.read_text(encoding="utf-8", errors="ignore")
+              for f in scan_files if f.exists()
+          )
+
+          patterns = [
+              r"com\.android\.(?:application|library)[\"']?\)?\s+version\s+[\"']([0-9]+(?:\.[0-9]+){1,3})[\"']",
+              r"com\.android\.tools\.build:gradle:([0-9]+(?:\.[0-9]+){1,3})",
+          ]
+          agp = None
+          for pattern in patterns:
+              m = re.search(pattern, text)
+              if m:
+                  agp = m.group(1)
+                  break
+
+          wrapper_text = wrapper.read_text(encoding="utf-8")
+          m = re.search(r"gradle-([0-9]+(?:\.[0-9]+){1,3})-(bin|all)\.zip", wrapper_text)
+          if not m:
+              raise SystemExit("Versi Gradle tidak dapat dibaca dari gradle-wrapper.properties")
+
+          current_gradle = m.group(1)
+          package_kind = m.group(2)
+
+          def ver(v):
+              parts = [int(x) for x in v.split(".")]
+              return tuple((parts + [0, 0, 0, 0])[:4])
+
+          if agp and ver(agp) >= ver("9.0.0"):
+              required_gradle = "9.1.0"
+          else:
+              required_gradle = "8.14.3"
+
+          print(f"Detected AGP: {agp or 'unknown'}")
+          print(f"Current Gradle: {current_gradle}")
+          print(f"Required Gradle: {required_gradle}")
+
+          if ver(current_gradle) < ver(required_gradle):
+              wrapper_text = re.sub(
+                  r"gradle-[0-9]+(?:\.[0-9]+){1,3}-(?:bin|all)\.zip",
+                  f"gradle-{required_gradle}-{package_kind}.zip",
+                  wrapper_text,
+                  count=1,
+              )
+              wrapper.write_text(wrapper_text, encoding="utf-8")
+              print(f"Gradle wrapper upgraded: {current_gradle} -> {required_gradle}")
+          else:
+              print("Gradle wrapper sudah memenuhi requirement")
+
+          if agp and ver(agp) >= ver("9.0.0"):
+              prop_text = props.read_text(encoding="utf-8") if props.exists() else ""
+
+              def set_prop(src, key, value):
+                  line = f"{key}={value}"
+                  rx = re.compile(rf"(?m)^\s*{re.escape(key)}\s*=.*$")
+                  if rx.search(src):
+                      return rx.sub(line, src)
+                  if src and not src.endswith("\n"):
+                      src += "\n"
+                  return src + line + "\n"
+
+              prop_text = set_prop(prop_text, "android.newDsl", "false")
+
+              legacy_kgp = (
+                  "org.jetbrains.kotlin.android" in text
+                  or "kotlin-android" in text
+              )
+              if legacy_kgp:
+                  prop_text = set_prop(prop_text, "android.builtInKotlin", "false")
+                  print("Legacy Kotlin plugin detected: android.builtInKotlin=false")
+
+              props.write_text(prop_text, encoding="utf-8")
+              print("AGP 9 compatibility: android.newDsl=false")
+          PY
+
+          echo "--- gradle-wrapper.properties ---"
+          grep '^distributionUrl=' android/gradle/wrapper/gradle-wrapper.properties
+          echo "--- compatibility properties ---"
+          grep -E '^android\.(newDsl|builtInKotlin)=' android/gradle.properties 2>/dev/null || true
+
       - name: Build APK
         env:
           BUILD_TYPE: ${{ inputs.build_type }}
