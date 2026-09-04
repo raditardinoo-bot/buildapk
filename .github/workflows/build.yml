@@ -22,7 +22,9 @@ on:
           - debug
 
 permissions:
-  contents: read
+  # Draft release assets require push-level access.
+  # contents: write also includes read access.
+  contents: write
 
 env:
   FLUTTER_CHANNEL: stable
@@ -53,7 +55,7 @@ jobs:
       - name: Download project ZIP
         env:
           ZIP_URL: ${{ inputs.zip_url }}
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.BUILDAPK_PAT || github.token }}
         run: |
           set -euo pipefail
 
