@@ -152,7 +152,126 @@ jobs:
             flutter create --platforms=android .
           fi
 
+
+      - name: Patch Flutter source compatibility
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          pubspec = Path("pubspec.yaml")
+          text = pubspec.read_text(encoding="utf-8")
+
+          # Flutter 3.44+ makes IconData final. font_awesome_flutter 10.x
+          # subclasses IconData and therefore cannot compile. Version 11.x
+          # uses FaIconData instead.
+          fa_line = re.compile(
+              r'(?m)^(\s*font_awesome_flutter\s*:\s*)(["\']?)([^#\n"\']+)(["\']?)(\s*(?:#.*)?)$'
+          )
+          fa_changed = False
+
+          def bump_fa(m):
+              global fa_changed
+              raw = m.group(3).strip()
+              vm = re.search(r'(\d+)\.(\d+)\.(\d+)', raw)
+              if vm and int(vm.group(1)) < 11:
+                  fa_changed = True
+                  return f'{m.group(1)}^11.0.0{m.group(5)}'
+              return m.group(0)
+
+          text = fa_line.sub(bump_fa, text)
+          if fa_changed:
+              print("font_awesome_flutter upgraded to ^11.0.0")
+          else:
+              print("font_awesome_flutter: no 10.x simple version declaration found")
+
+          # Repair source files that call http.post/http.get/etc. without importing
+          # package:http with the alias expected by those calls.
+          http_users = []
+          dart_files = list(Path("lib").rglob("*.dart")) if Path("lib").exists() else []
+          for dart in dart_files:
+              src = dart.read_text(encoding="utf-8", errors="ignore")
+              if not re.search(r'\bhttp\s*\.', src):
+                  continue
+
+              http_users.append(str(dart))
+              aliased = re.search(
+                  r'import\s+["\']package:http/http\.dart["\']\s+as\s+http\s*;',
+                  src,
+              )
+              if aliased:
+                  continue
+
+              bare = re.compile(
+                  r'import\s+(["\'])package:http/http\.dart\1\s*;'
+              )
+              if bare.search(src):
+                  src = bare.sub(
+                      "import 'package:http/http.dart' as http;", src, count=1
+                  )
+              else:
+                  first_import = re.search(r'(?m)^import\s+', src)
+                  if first_import:
+                      pos = first_import.start()
+                      src = (
+                          src[:pos]
+                          + "import 'package:http/http.dart' as http;\n"
+                          + src[pos:]
+                      )
+                  else:
+                      library_directive = re.search(r'(?m)^library\s+[^;]+;\s*$', src)
+                      if library_directive:
+                          pos = library_directive.end()
+                          src = (
+                              src[:pos]
+                              + "\nimport 'package:http/http.dart' as http;"
+                              + src[pos:]
+                          )
+                      else:
+                          src = "import 'package:http/http.dart' as http;\n" + src
+
+              dart.write_text(src, encoding="utf-8")
+              print(f"Fixed package:http alias import: {dart}")
+
+          # Make package:http a direct dependency when source code uses http.*.
+          # http 1.6.0 supports Dart >=3.4, well below Flutter 3.47's Dart SDK.
+          if http_users and not re.search(r'(?m)^  http\s*:', text):
+              if not re.search(r'(?m)^dependencies\s*:\s*$', text):
+                  raise SystemExit("dependencies: section not found in pubspec.yaml")
+              text = re.sub(
+                  r'(?m)^dependencies\s*:\s*$',
+                  'dependencies:\n  http: ^1.6.0',
+                  text,
+                  count=1,
+              )
+              print("Added direct dependency: http ^1.6.0")
+
+          pubspec.write_text(text, encoding="utf-8")
+
+          # font_awesome_flutter 11 no longer allows FontAwesomeIcons directly
+          # inside Flutter's standard Icon widget. Migrate the common old form:
+          # Icon(FontAwesomeIcons.foo, ...) -> FaIcon(FontAwesomeIcons.foo, ...)
+          icon_ctor = re.compile(
+              r'\bIcon(?=\s*\(\s*FontAwesomeIcons\.[A-Za-z0-9_]+)'
+          )
+          migrated_icons = 0
+          for dart in dart_files:
+              src = dart.read_text(encoding="utf-8", errors="ignore")
+              out, count = icon_ctor.subn("FaIcon", src)
+              if count:
+                  dart.write_text(out, encoding="utf-8")
+                  migrated_icons += count
+                  print(f"Migrated {count} FontAwesome Icon constructor(s): {dart}")
+
+          print(f"http user files: {len(http_users)}")
+          print(f"FontAwesome Icon constructors migrated: {migrated_icons}")
+          PY
+
           flutter pub get
+          flutter clean
 
       - name: Fix Android build toolchain compatibility
         run: |
