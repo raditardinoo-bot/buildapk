@@ -270,7 +270,8 @@ jobs:
           print(f"FontAwesome Icon constructors migrated: {migrated_icons}")
           PY
 
-          flutter pub get
+          # Clean must happen BEFORE pub get. flutter clean deletes .dart_tool,
+          # including package_config.json required by plugin registrant/build hooks.
           flutter clean
 
       - name: Fix Android build toolchain compatibility
@@ -521,6 +522,24 @@ jobs:
 
           echo "--- compatibility properties ---"
           grep -E '^android\.(newDsl|builtInKotlin)=' android/gradle.properties 2>/dev/null || true
+
+      - name: Resolve Flutter dependencies
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+
+          # This must be the final dependency-resolution step after flutter clean
+          # and after all pubspec/source compatibility patches.
+          flutter pub get
+
+          if [ ! -s .dart_tool/package_config.json ]; then
+            echo "ERROR: .dart_tool/package_config.json tidak dibuat oleh flutter pub get"
+            ls -la .dart_tool 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "package_config.json ready:"
+          ls -lh .dart_tool/package_config.json
 
       - name: Build APK
         env:
